@@ -1,29 +1,49 @@
 Clear-Host
 
-$DynAssembly = New-Object System.Reflection.AssemblyName('SysUtils')
-$AssemblyBuilder = [AppDomain]::CurrentDomain.DefineDynamicAssembly($DynAssembly, [Reflection.Emit.AssemblyBuilderAccess]::Run)
-$ModuleBuilder = $AssemblyBuilder.DefineDynamicModule('SysUtils', $False)
+$signature = @'
+[DllImport("kernel32.dll", SetLastError=true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool GetVolumePathNamesForVolumeNameW([MarshalAs(UnmanagedType.LPWStr)] string lpszVolumeName,
+        [MarshalAs(UnmanagedType.LPWStr)] [Out] StringBuilder lpszVolumeNamePaths, uint cchBuferLength, 
+        ref UInt32 lpcchReturnLength);
 
-$TypeBuilder = $ModuleBuilder.DefineType('Kernel32', 'Public, Class')
-$PInvokeMethod = $TypeBuilder.DefinePInvokeMethod('QueryDosDevice', 'kernel32.dll', ([Reflection.MethodAttributes]::Public -bor [Reflection.MethodAttributes]::Static), [Reflection.CallingConventions]::Standard, [UInt32], [Type[]]@([String], [Text.StringBuilder], [UInt32]), [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Auto)
-$DllImportConstructor = [Runtime.InteropServices.DllImportAttribute].GetConstructor(@([String]))
-$SetLastError = [Runtime.InteropServices.DllImportAttribute].GetField('SetLastError')
-$SetLastErrorCustomAttribute = New-Object Reflection.Emit.CustomAttributeBuilder($DllImportConstructor, @('kernel32.dll'), [Reflection.FieldInfo[]]@($SetLastError), @($true))
-$PInvokeMethod.SetCustomAttribute($SetLastErrorCustomAttribute)
-$Kernel32 = $TypeBuilder.CreateType()
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern IntPtr FindFirstVolume([Out] StringBuilder lpszVolumeName,
+   uint cchBufferLength);
 
-$Max = 65536
-$StringBuilder = New-Object System.Text.StringBuilder($Max)
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool FindNextVolume(IntPtr hFindVolume, [Out] StringBuilder lpszVolumeName, uint cchBufferLength);
 
-$deviceMapping = @{}
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern uint QueryDosDevice(string lpDeviceName, StringBuilder lpTargetPath, int ucchMax);
+'@;
 
-Get-WmiObject Win32_Volume | Where-Object { $_.DriveLetter } | ForEach-Object {
-    $ReturnLength = $Kernel32::QueryDosDevice($_.DriveLetter, $StringBuilder, $Max)
+Add-Type -MemberDefinition $signature -Name Win32Utils -Namespace PInvoke -Using PInvoke,System.Text;
 
+[UInt32] $lpcchReturnLength = 0;
+[UInt32] $Max = 65535
+$sbVolumeName = New-Object System.Text.StringBuilder($Max, $Max)
+$sbPathName = New-Object System.Text.StringBuilder($Max, $Max)
+$sbMountPoint = New-Object System.Text.StringBuilder($Max, $Max)
+
+[IntPtr] $volumeHandle = [PInvoke.Win32Utils]::FindFirstVolume($sbVolumeName, $Max)
+
+$deviceMapping = @{ }
+
+do {
+    $volume = $sbVolumeName.toString()
+    $unused = [PInvoke.Win32Utils]::GetVolumePathNamesForVolumeNameW($volume, $sbMountPoint, $Max, [Ref] $lpcchReturnLength)
+    $ReturnLength = [PInvoke.Win32Utils]::QueryDosDevice($volume.Substring(4, $volume.Length - 1 - 4), $sbPathName, [UInt32] $Max)
+    
     if ($ReturnLength) {
-        $deviceMapping[$StringBuilder.ToString()] = $_.DriveLetter
+        $DriveMapping = @{
+            DriveLetter = $sbMountPoint.toString()
+            VolumeName = $volume
+            DevicePath = $sbPathName.ToString()
+        }
+        $deviceMapping[$DriveMapping.DevicePath] = $DriveMapping.DriveLetter
     }
-}
+} while ([PInvoke.Win32Utils]::FindNextVolume([IntPtr] $volumeHandle, $sbVolumeName, $Max))
 
 $Bias = (Get-TimeZone).BaseUtcOffset.TotalMinutes
 
@@ -83,7 +103,7 @@ foreach ($entry in $bamEntries) {
         if ($originalPath -like "*$device*") {
             $escapedDevice = [regex]::Escape($device)
             $newPath = $originalPath -replace $escapedDevice, "$($deviceMapping[$device])"
-            $entry.Path = $newPath.TrimEnd('\')
+            $entry.Path = $newPath -replace '\\+', '\'
             break
         }
     }
@@ -98,23 +118,34 @@ $strings = @(
     "Waiting for minecraft process...", "Autoclicker->", "MoonDLL.pdb", "slinky_init"
 )
 
+Write-Output " "
+Write-Output "Initiating malicious string analysis..."
+
 foreach ($entry in $bamEntries) {
     $fullPath = $entry.Path
-
+    
     if (-not [string]::IsNullOrEmpty($fullPath) -and (Test-Path $fullPath)) {
-        $signature = Get-AuthenticodeSignature $fullPath
-        $entry.Signatures = if ($signature.Status -eq 'Valid') { "Signed" } else { "Not Signed" }
+        $maliciousStringsFound = @()
+        
+        foreach ($string in $strings) {
+            $escapedString = [Regex]::Escape($string)
+            $findstrResult = cmd.exe /c "findstr /i /c:`"$escapedString`" `"$fullPath`""
 
-        $containsMaliciousString = $strings | Where-Object { $fullPath -contains $_ }
+            if ($findstrResult) {
+                $maliciousStringsFound += $string
+            }
+        }
 
-        if ($containsMaliciousString) {
-            $maliciousString = $containsMaliciousString | Select-Object -First 1
-            $entry | Add-Member -MemberType NoteProperty -Name "Contains Malicious Strings" -Value $maliciousString
+        if ($maliciousStringsFound.Count -gt 0) {
+            $maliciousStringList = $maliciousStringsFound -join ", "
+            $entry | Add-Member -MemberType NoteProperty -Name "Contains Malicious Strings" -Value $maliciousStringList
         } else {
             $entry | Add-Member -MemberType NoteProperty -Name "Contains Malicious Strings" -Value "N/A"
         }
     }
 }
+
+Write-Output "Analysis of malicious strings completed (Gridview will start soon)."
 
 $usnjournalONE = "C:\newnamefiles.txt"
 $usnjournalTWO = "C:\deletedfiles.txt"
@@ -163,5 +194,4 @@ foreach ($entry in $bamEntries) {
 }
 
 Write-Host "Completed processing for all SIDs (BAM Entries)." -ForegroundColor Green
-
 $bamEntries | Out-GridView -Title "BAM Entries script created by diff"
