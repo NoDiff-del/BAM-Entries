@@ -125,6 +125,9 @@ foreach ($entry in $bamEntries) {
     $fullPath = $entry.Path
     
     if (-not [string]::IsNullOrEmpty($fullPath) -and (Test-Path $fullPath)) {
+        $signature = Get-AuthenticodeSignature $fullPath
+        $entry.Signatures = if ($signature.Status -eq 'Valid') { "Signed" } else { "Not Signed" }
+
         $maliciousStringsFound = @()
         
         foreach ($string in $strings) {
